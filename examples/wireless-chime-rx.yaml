@@ -1,0 +1,37 @@
+esphome:
+  name: wireless-chime-rx
+  friendly_name: Wireless Chime Receiver
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+logger:
+
+api:
+  homeassistant_services: true
+
+ota:
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  ap:
+    ssid: "WirelessChimeRX"
+    password: "changeme123"
+
+captive_portal:
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/MBGaruda/esphome-jp-wireless-chime
+      ref: main
+    components:
+      - jp_wireless_chime_receiver
+
+jp_wireless_chime_receiver:
+  pin: GPIO27
+  
