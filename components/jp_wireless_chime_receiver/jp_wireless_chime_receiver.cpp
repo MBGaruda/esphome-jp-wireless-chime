@@ -12,12 +12,13 @@ static const char *const TAG = "jp_wireless_chime_receiver";
 static constexpr uint8_t PROTOCOL_VERSION = 1;
 static constexpr uint16_t RING_SIZE = 2048;
 static constexpr uint16_t MIN_EDGE_US = 100;
-static constexpr uint8_t FRAME_BITS = 24;
 
-// 同一チャイムのESPHome側ガードタイム
+static constexpr uint8_t REVEX_X_BITS = 24;
+static constexpr uint8_t REVEX_XP_BITS = 34;
+static constexpr uint8_t OHM_BITS = 24;
+static constexpr uint8_t MAX_BITS = 34;
+
 static constexpr uint32_t EMIT_DEDUPE_MS = 5000;
-
-// HA APIへ連続送信しないための最低間隔
 static constexpr uint32_t HA_SEND_INTERVAL_MS = 300;
 
 static const char *const HA_EVENT_NAME = "esphome.jp_wireless_chime_raw_received";
@@ -31,7 +32,7 @@ struct DecoderState {
   bool active;
   uint8_t bit_count;
   char pending;
-  char bits[FRAME_BITS + 1];
+  char bits[MAX_BITS + 1];
   uint16_t sync_us;
 };
 
@@ -40,22 +41,28 @@ struct PendingEvent {
   std::string protocol;
   std::string bits;
   std::string raw_hex;
+  uint8_t bit_count;
   uint16_t sync_us;
   uint32_t received_at_ms;
 };
 
+struct RecentEvent {
+  std::string key;
+  uint32_t at_ms;
+};
+
 static volatile Pulse ring[RING_SIZE];
 static volatile uint16_t write_index = 0;
-static uint16_t read_index = 0;
+static volatile uint16_t read_index = 0;
 static GPIOPin *isr_pin = nullptr;
 
 static DecoderState revex_state{false, 0, 0, "", 0};
 static DecoderState ohm_state{false, 0, 0, "", 0};
 
-static PendingEvent pending_event{false, "", "", "", 0, 0};
+static PendingEvent pending_event{false, "", "", "", 0, 0, 0};
 
-static std::string last_emit_key;
-static uint32_t last_emit_ms = 0;
+static RecentEvent recent_events[8];
+static uint8_t recent_event_pos = 0;
 static uint32_t last_ha_send_ms = 0;
 
 static bool in_range(uint16_t v, uint16_t min_v, uint16_t max_v) {
@@ -98,11 +105,15 @@ static void start_decoder(DecoderState &st, uint16_t sync_us) {
   st.sync_us = sync_us;
 }
 
-static std::string bits_to_hex(const char *bits) {
+static std::string bits_to_hex(const char *bits, uint8_t bit_count) {
   std::string hex;
-  hex.reserve(6);
+  hex.reserve((bit_count + 3) / 4);
 
-  for (uint8_t i = 0; i < FRAME_BITS; i += 4) {
+  // 4bit単位でHEX化する。
+  // REVEX XPは34bitだが、末尾2bitは終端 "00" のため、raw_hexは先頭32bitをHEX化する。
+  uint8_t full_nibbles = bit_count / 4;
+
+  for (uint8_t i = 0; i < full_nibbles * 4; i += 4) {
     uint8_t v = 0;
 
     for (uint8_t j = 0; j < 4; j++) {
@@ -120,16 +131,21 @@ static bool should_queue_event(const std::string &protocol, const std::string &r
   std::string key = protocol + ":" + raw_hex;
   uint32_t now = millis();
 
-  if (key == last_emit_key && now - last_emit_ms < EMIT_DEDUPE_MS) {
-    return false;
+  for (auto &recent : recent_events) {
+    if (recent.key == key && now - recent.at_ms < EMIT_DEDUPE_MS) {
+      return false;
+    }
   }
 
-  last_emit_key = key;
-  last_emit_ms = now;
+  recent_events[recent_event_pos].key = key;
+  recent_events[recent_event_pos].at_ms = now;
+  recent_event_pos = (recent_event_pos + 1) % 8;
+
   return true;
 }
 
-static void queue_event(const char *protocol, const char *bits, const std::string &raw_hex, uint16_t sync_us) {
+static void queue_event(const char *protocol, const char *bits, uint8_t bit_count,
+                        const std::string &raw_hex, uint16_t sync_us) {
   if (!should_queue_event(protocol, raw_hex)) {
     return;
   }
@@ -138,10 +154,44 @@ static void queue_event(const char *protocol, const char *bits, const std::strin
   pending_event.protocol = protocol;
   pending_event.bits = bits;
   pending_event.raw_hex = raw_hex;
+  pending_event.bit_count = bit_count;
   pending_event.sync_us = sync_us;
   pending_event.received_at_ms = millis();
 
-  ESP_LOGI(TAG, "Queued HA event: protocol=%s raw_hex=%s", protocol, raw_hex.c_str());
+  ESP_LOGI(TAG, "Queued HA event: protocol=%s raw_hex=%s bit_count=%u",
+           protocol, raw_hex.c_str(), bit_count);
+}
+
+static void emit_revex_if_valid(DecoderState &st, bool force_x) {
+  if (!st.active) return;
+
+  if (st.bit_count == REVEX_XP_BITS) {
+    st.bits[REVEX_XP_BITS] = '\0';
+    std::string raw_hex = bits_to_hex(st.bits, REVEX_XP_BITS);
+
+    ESP_LOGD(TAG, "RX revex_xp raw_hex=%s bits=%s sync=%u",
+             raw_hex.c_str(), st.bits, st.sync_us);
+
+    queue_event("revex_xp", st.bits, REVEX_XP_BITS, raw_hex, st.sync_us);
+    reset_decoder(st);
+    return;
+  }
+
+  if (force_x && st.bit_count == REVEX_X_BITS) {
+    st.bits[REVEX_X_BITS] = '\0';
+    std::string raw_hex = bits_to_hex(st.bits, REVEX_X_BITS);
+
+    ESP_LOGD(TAG, "RX revex_x raw_hex=%s bits=%s sync=%u",
+             raw_hex.c_str(), st.bits, st.sync_us);
+
+    queue_event("revex_x", st.bits, REVEX_X_BITS, raw_hex, st.sync_us);
+    reset_decoder(st);
+    return;
+  }
+
+  if (force_x) {
+    reset_decoder(st);
+  }
 }
 
 static void IRAM_ATTR gpio_intr() {
@@ -181,7 +231,7 @@ void JPWirelessChimeReceiver::loop() {
       data["protocol_version"] = "1";
       data["source"] = "esp32_rf_receiver";
       data["protocol_hint"] = pending_event.protocol;
-      data["bit_count"] = "24";
+      data["bit_count"] = std::to_string(pending_event.bit_count);
       data["bits"] = pending_event.bits;
       data["raw_hex"] = pending_event.raw_hex;
       data["sync_us"] = std::to_string(pending_event.sync_us);
@@ -189,8 +239,10 @@ void JPWirelessChimeReceiver::loop() {
 
       this->fire_homeassistant_event(HA_EVENT_NAME, data);
 
-      ESP_LOGI(TAG, "HA event sent: protocol=%s raw_hex=%s",
-               pending_event.protocol.c_str(), pending_event.raw_hex.c_str());
+      ESP_LOGI(TAG, "HA event sent: protocol=%s raw_hex=%s bit_count=%u",
+               pending_event.protocol.c_str(),
+               pending_event.raw_hex.c_str(),
+               pending_event.bit_count);
 
       pending_event.pending = false;
       last_ha_send_ms = now;
@@ -206,14 +258,17 @@ void JPWirelessChimeReceiver::loop() {
     read_index = (read_index + 1) % RING_SIZE;
     interrupts();
 
-    // REVEX X
+    // REVEX X / REVEX XP decoder
     if (is_revex_sync(p.duration)) {
+      // REVEX Xは24bit後に次のsyncが来る。
+      // REVEX XPは34bitまで続くため、24bit到達時点では確定しない。
+      emit_revex_if_valid(revex_state, true);
       start_decoder(revex_state, p.duration);
     } else if (revex_state.active) {
       char c = revex_class(p.duration);
 
       if (c == '?') {
-        reset_decoder(revex_state);
+        emit_revex_if_valid(revex_state, true);
       } else if (revex_state.pending == 0) {
         revex_state.pending = c;
       } else {
@@ -226,24 +281,18 @@ void JPWirelessChimeReceiver::loop() {
         } else if (a == 'S' && b == 'L') {
           revex_state.bits[revex_state.bit_count++] = '0';
         } else {
-          reset_decoder(revex_state);
+          emit_revex_if_valid(revex_state, true);
         }
 
-        if (revex_state.active && revex_state.bit_count == FRAME_BITS) {
-          revex_state.bits[FRAME_BITS] = '\0';
-          std::string raw_hex = bits_to_hex(revex_state.bits);
-
-          ESP_LOGD(TAG, "RX revex_x raw_hex=%s bits=%s sync=%u",
-                   raw_hex.c_str(), revex_state.bits, revex_state.sync_us);
-
-          queue_event("revex_x", revex_state.bits, raw_hex, revex_state.sync_us);
-
+        if (revex_state.active && revex_state.bit_count == REVEX_XP_BITS) {
+          emit_revex_if_valid(revex_state, false);
+        } else if (revex_state.active && revex_state.bit_count > REVEX_XP_BITS) {
           reset_decoder(revex_state);
         }
       }
     }
 
-    // OHM 07
+    // OHM-07 decoder
     if (is_ohm_sync(p.duration)) {
       start_decoder(ohm_state, p.duration);
     } else if (ohm_state.active) {
@@ -266,15 +315,17 @@ void JPWirelessChimeReceiver::loop() {
           reset_decoder(ohm_state);
         }
 
-        if (ohm_state.active && ohm_state.bit_count == FRAME_BITS) {
-          ohm_state.bits[FRAME_BITS] = '\0';
-          std::string raw_hex = bits_to_hex(ohm_state.bits);
+        if (ohm_state.active && ohm_state.bit_count == OHM_BITS) {
+          ohm_state.bits[OHM_BITS] = '\0';
+          std::string raw_hex = bits_to_hex(ohm_state.bits, OHM_BITS);
 
-          ESP_LOGD(TAG, "RX ohm raw_hex=%s bits=%s sync=%u",
+          ESP_LOGD(TAG, "RX ohm_07 raw_hex=%s bits=%s sync=%u",
                    raw_hex.c_str(), ohm_state.bits, ohm_state.sync_us);
 
-          queue_event("ohm_08", ohm_state.bits, raw_hex, ohm_state.sync_us);
+          queue_event("ohm_07", ohm_state.bits, OHM_BITS, raw_hex, ohm_state.sync_us);
 
+          reset_decoder(ohm_state);
+        } else if (ohm_state.active && ohm_state.bit_count > OHM_BITS) {
           reset_decoder(ohm_state);
         }
       }
