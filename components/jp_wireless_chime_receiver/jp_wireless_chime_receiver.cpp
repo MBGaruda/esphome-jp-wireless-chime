@@ -109,8 +109,6 @@ static std::string bits_to_hex(const char *bits, uint8_t bit_count) {
   std::string hex;
   hex.reserve((bit_count + 3) / 4);
 
-  // 4bit単位でHEX化する。
-  // REVEX XPは34bitだが、末尾2bitは終端 "00" のため、raw_hexは先頭32bitをHEX化する。
   uint8_t full_nibbles = bit_count / 4;
 
   for (uint8_t i = 0; i < full_nibbles * 4; i += 4) {
@@ -162,22 +160,24 @@ static void queue_event(const char *protocol, const char *bits, uint8_t bit_coun
            protocol, raw_hex.c_str(), bit_count);
 }
 
-static void emit_revex_if_valid(DecoderState &st, bool force_x) {
+static bool revex_xp_has_valid_terminator(const DecoderState &st) {
+  return st.bit_count == REVEX_XP_BITS &&
+         st.bits[REVEX_XP_BITS - 2] == '0' &&
+         st.bits[REVEX_XP_BITS - 1] == '0';
+}
+
+static void finalize_revex_frame(DecoderState &st) {
   if (!st.active) return;
 
-  if (st.bit_count == REVEX_XP_BITS) {
+  if (st.bit_count == REVEX_XP_BITS && revex_xp_has_valid_terminator(st)) {
     st.bits[REVEX_XP_BITS] = '\0';
-    std::string raw_hex = bits_to_hex(st.bits, REVEX_XP_BITS);
+    std::string raw_hex = bits_to_hex(st.bits, 32);
 
     ESP_LOGD(TAG, "RX revex_xp raw_hex=%s bits=%s sync=%u",
              raw_hex.c_str(), st.bits, st.sync_us);
 
     queue_event("revex_xp", st.bits, REVEX_XP_BITS, raw_hex, st.sync_us);
-    reset_decoder(st);
-    return;
-  }
-
-  if (force_x && st.bit_count == REVEX_X_BITS) {
+  } else if (st.bit_count == REVEX_X_BITS) {
     st.bits[REVEX_X_BITS] = '\0';
     std::string raw_hex = bits_to_hex(st.bits, REVEX_X_BITS);
 
@@ -185,13 +185,11 @@ static void emit_revex_if_valid(DecoderState &st, bool force_x) {
              raw_hex.c_str(), st.bits, st.sync_us);
 
     queue_event("revex_x", st.bits, REVEX_X_BITS, raw_hex, st.sync_us);
-    reset_decoder(st);
-    return;
+  } else {
+    ESP_LOGV(TAG, "Discard REVEX frame: bit_count=%u", st.bit_count);
   }
 
-  if (force_x) {
-    reset_decoder(st);
-  }
+  reset_decoder(st);
 }
 
 static void IRAM_ATTR gpio_intr() {
@@ -260,15 +258,13 @@ void JPWirelessChimeReceiver::loop() {
 
     // REVEX X / REVEX XP decoder
     if (is_revex_sync(p.duration)) {
-      // REVEX Xは24bit後に次のsyncが来る。
-      // REVEX XPは34bitまで続くため、24bit到達時点では確定しない。
-      emit_revex_if_valid(revex_state, true);
+      finalize_revex_frame(revex_state);
       start_decoder(revex_state, p.duration);
     } else if (revex_state.active) {
       char c = revex_class(p.duration);
 
       if (c == '?') {
-        emit_revex_if_valid(revex_state, true);
+        finalize_revex_frame(revex_state);
       } else if (revex_state.pending == 0) {
         revex_state.pending = c;
       } else {
@@ -277,17 +273,23 @@ void JPWirelessChimeReceiver::loop() {
         revex_state.pending = 0;
 
         if (a == 'L' && b == 'S') {
-          revex_state.bits[revex_state.bit_count++] = '1';
+          if (revex_state.bit_count < MAX_BITS) {
+            revex_state.bits[revex_state.bit_count++] = '1';
+          } else {
+            finalize_revex_frame(revex_state);
+          }
         } else if (a == 'S' && b == 'L') {
-          revex_state.bits[revex_state.bit_count++] = '0';
+          if (revex_state.bit_count < MAX_BITS) {
+            revex_state.bits[revex_state.bit_count++] = '0';
+          } else {
+            finalize_revex_frame(revex_state);
+          }
         } else {
-          emit_revex_if_valid(revex_state, true);
+          finalize_revex_frame(revex_state);
         }
 
         if (revex_state.active && revex_state.bit_count == REVEX_XP_BITS) {
-          emit_revex_if_valid(revex_state, false);
-        } else if (revex_state.active && revex_state.bit_count > REVEX_XP_BITS) {
-          reset_decoder(revex_state);
+          finalize_revex_frame(revex_state);
         }
       }
     }
