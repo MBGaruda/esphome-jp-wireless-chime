@@ -111,7 +111,6 @@ static void start_decoder(DecoderState &st, uint16_t sync_us) {
 
 static std::string bits_to_hex(const char *bits, uint8_t bit_count) {
   std::string hex;
-
   uint8_t full_nibbles = bit_count / 4;
 
   for (uint8_t i = 0; i < full_nibbles * 4; i += 4) {
@@ -124,11 +123,7 @@ static std::string bits_to_hex(const char *bits, uint8_t bit_count) {
       }
     }
 
-    if (v < 10) {
-      hex.push_back('0' + v);
-    } else {
-      hex.push_back('A' + (v - 10));
-    }
+    hex.push_back(v < 10 ? char('0' + v) : char('A' + (v - 10)));
   }
 
   return hex;
@@ -137,20 +132,22 @@ static std::string bits_to_hex(const char *bits, uint8_t bit_count) {
 static bool should_queue_event(
     const std::string &protocol,
     const std::string &raw_hex) {
-
   std::string key = protocol + ":" + raw_hex;
   uint32_t now = millis();
 
   for (auto &recent : recent_events) {
     if (recent.key == key &&
         now - recent.at_ms < EMIT_DEDUPE_MS) {
+      ESP_LOGD(TAG,
+               "Duplicate suppressed: protocol=%s raw_hex=%s",
+               protocol.c_str(),
+               raw_hex.c_str());
       return false;
     }
   }
 
   recent_events[recent_event_pos].key = key;
   recent_events[recent_event_pos].at_ms = now;
-
   recent_event_pos = (recent_event_pos + 1) % 8;
 
   return true;
@@ -162,12 +159,7 @@ static void queue_event(
     uint8_t bit_count,
     const std::string &raw_hex,
     uint16_t sync_us) {
-
   if (!should_queue_event(protocol, raw_hex)) {
-    ESP_LOGI(TAG,
-             "Duplicate suppressed: protocol=%s raw_hex=%s",
-             protocol,
-             raw_hex.c_str());
     return;
   }
 
@@ -193,10 +185,9 @@ static bool revex_xp_has_valid_terminator(const DecoderState &st) {
       st.bits[33] == '0';
 }
 
-static void log_revex_candidate(
+static void log_revex_discard(
     const char *reason,
     const DecoderState &st) {
-
   char tmp[MAX_BITS + 1];
 
   uint8_t n = st.bit_count;
@@ -210,46 +201,31 @@ static void log_revex_candidate(
 
   tmp[n] = '\0';
 
-  std::string raw_hex = bits_to_hex(tmp, n);
-
-  ESP_LOGI(TAG,
-           "REVEX discard: reason=%s bit_count=%u pending=%c bits=%s raw_hex=%s",
+  ESP_LOGD(TAG,
+           "REVEX discard: reason=%s bit_count=%u pending=%c bits=%s",
            reason,
            st.bit_count,
            st.pending == 0 ? '-' : st.pending,
-           tmp,
-           raw_hex.c_str());
+           tmp);
 }
 
 static void finalize_revex_frame(
     DecoderState &st,
     const char *reason) {
-
   if (!st.active) {
     return;
   }
 
-  /*
-   * Important:
-   * Some REVEX frames leave one extra classified pulse in pending
-   * after the complete 24bit or 34bit payload has already been decoded.
-   *
-   * Therefore valid-length checks must happen before rejecting
-   * pending_half_pair.
-   */
-
   if (st.bit_count == REVEX_XP_BITS &&
       revex_xp_has_valid_terminator(st)) {
-
     st.bits[REVEX_XP_BITS] = '\0';
 
     std::string raw_hex = bits_to_hex(st.bits, 32);
 
-    ESP_LOGI(TAG,
-             "REVEX XP detected bits=%s raw_hex=%s pending=%c reason=%s",
+    ESP_LOGD(TAG,
+             "REVEX XP detected: bits=%s raw_hex=%s reason=%s",
              st.bits,
              raw_hex.c_str(),
-             st.pending == 0 ? '-' : st.pending,
              reason);
 
     queue_event(
@@ -268,11 +244,10 @@ static void finalize_revex_frame(
 
     std::string raw_hex = bits_to_hex(st.bits, REVEX_X_BITS);
 
-    ESP_LOGI(TAG,
-             "REVEX X detected bits=%s raw_hex=%s pending=%c reason=%s",
+    ESP_LOGD(TAG,
+             "REVEX X detected: bits=%s raw_hex=%s reason=%s",
              st.bits,
              raw_hex.c_str(),
-             st.pending == 0 ? '-' : st.pending,
              reason);
 
     queue_event(
@@ -286,13 +261,7 @@ static void finalize_revex_frame(
     return;
   }
 
-  if (st.pending != 0) {
-    log_revex_candidate("pending_half_pair", st);
-    reset_decoder(st);
-    return;
-  }
-
-  log_revex_candidate(reason, st);
+  log_revex_discard(reason, st);
   reset_decoder(st);
 }
 
@@ -334,19 +303,12 @@ void JPWirelessChimeReceiver::setup() {
       gpio_intr,
       CHANGE);
 
-  ESP_LOGI(TAG,
-           "JP Wireless Chime Receiver started");
-
-  ESP_LOGI(TAG,
-           "protocol_version=%u",
-           PROTOCOL_VERSION);
-
-  ESP_LOGI(TAG,
-           "REVEX X/XP frame-length decoder enabled");
+  ESP_LOGI(TAG, "JP Wireless Chime Receiver started");
+  ESP_LOGI(TAG, "protocol_version=%u", PROTOCOL_VERSION);
+  ESP_LOGI(TAG, "ha_event=%s", HA_EVENT_NAME);
 }
 
 void JPWirelessChimeReceiver::loop() {
-
   if (pending_event.pending) {
     uint32_t now = millis();
 
@@ -402,7 +364,7 @@ void JPWirelessChimeReceiver::loop() {
       char c = revex_class(p.duration);
 
       if (c == '?') {
-        ESP_LOGI(TAG,
+        ESP_LOGD(TAG,
                  "REVEX invalid pulse=%u",
                  p.duration);
 
@@ -438,7 +400,7 @@ void JPWirelessChimeReceiver::loop() {
           }
 
         } else {
-          ESP_LOGI(TAG,
+          ESP_LOGD(TAG,
                    "REVEX invalid pair=%c%c",
                    a,
                    b);
@@ -467,6 +429,11 @@ void JPWirelessChimeReceiver::loop() {
       char c = ohm_class(p.duration);
 
       if (c == '?') {
+        ESP_LOGD(TAG,
+                 "OHM invalid pulse=%u bit_count=%u",
+                 p.duration,
+                 ohm_state.bit_count);
+
         reset_decoder(ohm_state);
 
       } else if (ohm_state.pending == 0) {
@@ -479,18 +446,31 @@ void JPWirelessChimeReceiver::loop() {
         ohm_state.pending = 0;
 
         if (a == 'A' && b == 'B') {
-          ohm_state.bits[ohm_state.bit_count++] = '0';
+          if (ohm_state.bit_count < OHM_BITS) {
+            ohm_state.bits[ohm_state.bit_count++] = '0';
+          } else {
+            reset_decoder(ohm_state);
+          }
 
         } else if (a == 'B' && b == 'A') {
-          ohm_state.bits[ohm_state.bit_count++] = '1';
+          if (ohm_state.bit_count < OHM_BITS) {
+            ohm_state.bits[ohm_state.bit_count++] = '1';
+          } else {
+            reset_decoder(ohm_state);
+          }
 
         } else {
+          ESP_LOGD(TAG,
+                   "OHM invalid pair=%c%c bit_count=%u",
+                   a,
+                   b,
+                   ohm_state.bit_count);
+
           reset_decoder(ohm_state);
         }
 
         if (ohm_state.active &&
             ohm_state.bit_count == OHM_BITS) {
-
           ohm_state.bits[OHM_BITS] = '\0';
 
           std::string raw_hex =
@@ -498,8 +478,8 @@ void JPWirelessChimeReceiver::loop() {
                   ohm_state.bits,
                   OHM_BITS);
 
-          ESP_LOGI(TAG,
-                   "OHM-07 detected bits=%s raw_hex=%s",
+          ESP_LOGD(TAG,
+                   "OHM-07 detected: bits=%s raw_hex=%s",
                    ohm_state.bits,
                    raw_hex.c_str());
 
