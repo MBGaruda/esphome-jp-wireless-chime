@@ -166,8 +166,38 @@ static bool revex_xp_has_valid_terminator(const DecoderState &st) {
          st.bits[REVEX_XP_BITS - 1] == '0';
 }
 
-static void finalize_revex_frame(DecoderState &st) {
+static void log_revex_candidate(const char *reason, const DecoderState &st) {
   if (!st.active) return;
+
+  char tmp[MAX_BITS + 1];
+  uint8_t n = st.bit_count;
+  if (n > MAX_BITS) n = MAX_BITS;
+
+  for (uint8_t i = 0; i < n; i++) {
+    tmp[i] = st.bits[i];
+  }
+  tmp[n] = '\0';
+
+  std::string raw_hex = bits_to_hex(tmp, n);
+
+  ESP_LOGD(TAG,
+           "REVEX candidate discarded: reason=%s bit_count=%u bits=%s raw_hex=%s sync=%u pending=%c",
+           reason,
+           st.bit_count,
+           tmp,
+           raw_hex.c_str(),
+           st.sync_us,
+           st.pending == 0 ? '-' : st.pending);
+}
+
+static void finalize_revex_frame(DecoderState &st, const char *reason) {
+  if (!st.active) return;
+
+  if (st.pending != 0) {
+    log_revex_candidate("pending_half_pair", st);
+    reset_decoder(st);
+    return;
+  }
 
   if (st.bit_count == REVEX_XP_BITS && revex_xp_has_valid_terminator(st)) {
     st.bits[REVEX_XP_BITS] = '\0';
@@ -181,12 +211,12 @@ static void finalize_revex_frame(DecoderState &st) {
     st.bits[REVEX_X_BITS] = '\0';
     std::string raw_hex = bits_to_hex(st.bits, REVEX_X_BITS);
 
-    ESP_LOGD(TAG, "RX revex_x raw_hex=%s bits=%s sync=%u",
-             raw_hex.c_str(), st.bits, st.sync_us);
+    ESP_LOGD(TAG, "RX revex_x raw_hex=%s bits=%s sync=%u reason=%s",
+             raw_hex.c_str(), st.bits, st.sync_us, reason);
 
     queue_event("revex_x", st.bits, REVEX_X_BITS, raw_hex, st.sync_us);
   } else {
-    ESP_LOGV(TAG, "Discard REVEX frame: bit_count=%u", st.bit_count);
+    log_revex_candidate(reason, st);
   }
 
   reset_decoder(st);
@@ -218,6 +248,7 @@ void JPWirelessChimeReceiver::setup() {
   ESP_LOGI(TAG, "JP Wireless Chime Receiver started");
   ESP_LOGI(TAG, "protocol_version=%u", PROTOCOL_VERSION);
   ESP_LOGI(TAG, "ha_event=%s", HA_EVENT_NAME);
+  ESP_LOGI(TAG, "debug_revex_xp=true");
 }
 
 void JPWirelessChimeReceiver::loop() {
@@ -258,13 +289,14 @@ void JPWirelessChimeReceiver::loop() {
 
     // REVEX X / REVEX XP decoder
     if (is_revex_sync(p.duration)) {
-      finalize_revex_frame(revex_state);
+      finalize_revex_frame(revex_state, "next_revex_sync");
       start_decoder(revex_state, p.duration);
     } else if (revex_state.active) {
       char c = revex_class(p.duration);
 
       if (c == '?') {
-        finalize_revex_frame(revex_state);
+        ESP_LOGD(TAG, "REVEX invalid pulse: us=%u bit_count=%u", p.duration, revex_state.bit_count);
+        finalize_revex_frame(revex_state, "invalid_pulse");
       } else if (revex_state.pending == 0) {
         revex_state.pending = c;
       } else {
@@ -276,20 +308,21 @@ void JPWirelessChimeReceiver::loop() {
           if (revex_state.bit_count < MAX_BITS) {
             revex_state.bits[revex_state.bit_count++] = '1';
           } else {
-            finalize_revex_frame(revex_state);
+            finalize_revex_frame(revex_state, "overflow_before_1");
           }
         } else if (a == 'S' && b == 'L') {
           if (revex_state.bit_count < MAX_BITS) {
             revex_state.bits[revex_state.bit_count++] = '0';
           } else {
-            finalize_revex_frame(revex_state);
+            finalize_revex_frame(revex_state, "overflow_before_0");
           }
         } else {
-          finalize_revex_frame(revex_state);
+          ESP_LOGD(TAG, "REVEX invalid pair: %c%c bit_count=%u", a, b, revex_state.bit_count);
+          finalize_revex_frame(revex_state, "invalid_pair");
         }
 
         if (revex_state.active && revex_state.bit_count == REVEX_XP_BITS) {
-          finalize_revex_frame(revex_state);
+          finalize_revex_frame(revex_state, "xp_34bit_reached");
         }
       }
     }
