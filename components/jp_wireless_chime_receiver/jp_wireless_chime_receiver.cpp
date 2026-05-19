@@ -1,4 +1,5 @@
 #include "jp_wireless_chime_receiver.h"
+#include "esphome/core/application.h"
 #include "esphome/core/log.h"
 
 #include <map>
