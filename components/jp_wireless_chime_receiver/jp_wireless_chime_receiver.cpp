@@ -133,11 +133,7 @@ static std::string bits_to_hex(const char *bits, uint8_t bit_count) {
 static std::string make_suppress_key(
     const std::string &protocol,
     const std::string &raw_hex) {
-  if (protocol == "ohm_07") {
-    return protocol;
-  }
-
-  return protocol + ":" + raw_hex;
+  return protocol;
 }
 
 static bool should_queue_event(
