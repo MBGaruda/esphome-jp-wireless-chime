@@ -316,7 +316,7 @@ void JPWirelessChimeReceiver::loop() {
       std::map<std::string, std::string> data;
 
       data["protocol_version"] = "1";
-      data["source"] = "esp32_rf_receiver";
+      data["source"] = App.get_name();
       data["protocol_hint"] = pending_event.protocol;
       data["bit_count"] = std::to_string(pending_event.bit_count);
       data["bits"] = pending_event.bits;
