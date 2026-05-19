@@ -20,7 +20,7 @@ static constexpr uint8_t REVEX_XP_BITS = 34;
 static constexpr uint8_t OHM_BITS = 24;
 static constexpr uint8_t MAX_BITS = 34;
 
-static constexpr uint32_t EMIT_DEDUPE_MS = 5000;
+static constexpr uint32_t SAME_EVENT_IDLE_MS = 2000;
 static constexpr uint32_t HA_SEND_INTERVAL_MS = 300;
 
 static const char *const HA_EVENT_NAME =
@@ -51,7 +51,7 @@ struct PendingEvent {
 
 struct RecentEvent {
   std::string key;
-  uint32_t at_ms;
+  uint32_t last_seen_ms;
 };
 
 static volatile Pulse ring[RING_SIZE];
@@ -130,25 +130,44 @@ static std::string bits_to_hex(const char *bits, uint8_t bit_count) {
   return hex;
 }
 
+static std::string make_suppress_key(
+    const std::string &protocol,
+    const std::string &raw_hex) {
+  if (protocol == "ohm_07") {
+    return protocol;
+  }
+
+  return protocol + ":" + raw_hex;
+}
+
 static bool should_queue_event(
     const std::string &protocol,
     const std::string &raw_hex) {
-  std::string key = protocol + ":" + raw_hex;
+  std::string key = make_suppress_key(protocol, raw_hex);
   uint32_t now = millis();
 
   for (auto &recent : recent_events) {
-    if (recent.key == key &&
-        now - recent.at_ms < EMIT_DEDUPE_MS) {
-      ESP_LOGD(TAG,
-               "Duplicate suppressed: protocol=%s raw_hex=%s",
-               protocol.c_str(),
-               raw_hex.c_str());
-      return false;
+    if (recent.key == key) {
+      uint32_t elapsed = now - recent.last_seen_ms;
+
+      recent.last_seen_ms = now;
+
+      if (elapsed < SAME_EVENT_IDLE_MS) {
+        ESP_LOGD(TAG,
+                 "Duplicate suppressed: key=%s protocol=%s raw_hex=%s elapsed=%u",
+                 key.c_str(),
+                 protocol.c_str(),
+                 raw_hex.c_str(),
+                 elapsed);
+        return false;
+      }
+
+      return true;
     }
   }
 
   recent_events[recent_event_pos].key = key;
-  recent_events[recent_event_pos].at_ms = now;
+  recent_events[recent_event_pos].last_seen_ms = now;
   recent_event_pos = (recent_event_pos + 1) % 8;
 
   return true;
@@ -307,6 +326,7 @@ void JPWirelessChimeReceiver::setup() {
   ESP_LOGI(TAG, "JP Wireless Chime Receiver started");
   ESP_LOGI(TAG, "protocol_version=%u", PROTOCOL_VERSION);
   ESP_LOGI(TAG, "ha_event=%s", HA_EVENT_NAME);
+  ESP_LOGI(TAG, "ohm_07 suppress_mode=protocol");
 }
 
 void JPWirelessChimeReceiver::loop() {
@@ -330,7 +350,8 @@ void JPWirelessChimeReceiver::loop() {
           data);
 
       ESP_LOGI(TAG,
-               "HA event sent: protocol=%s bit_count=%u raw_hex=%s",
+               "HA event sent: source=%s protocol=%s bit_count=%u raw_hex=%s",
+               App.get_name().c_str(),
                pending_event.protocol.c_str(),
                pending_event.bit_count,
                pending_event.raw_hex.c_str());
