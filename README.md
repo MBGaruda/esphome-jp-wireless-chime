@@ -1,64 +1,139 @@
-# ESPHome JP Wireless Chime Receiver
+# JP Wireless Chime Receiver for ESPHome
 
-ESPHome external component for Home Assistant.
-Receives Japanese wireless chime RF signals using ESP32 and 315MHz RF receiver modules.
+An ESPHome External Component that receives Japanese wireless chime RF signals using ESP32 + ESPHome and forwards them as Home Assistant events.
 
-This component decodes RF signals from Japanese wireless door chime products and sends them as Home Assistant events.
+This component currently supports the following protocols:
+
+- REVEX X Series
+- REVEX XP Series
+- OHM-07 Series (wireless chime series with model numbers starting with 07)
+
+Received signals are published as Home Assistant events and can be used with integrations such as `ha-jp-wireless-chime`.
+
+Related repositories:
+
+- ha-jp-wireless-chime  
+  https://github.com/MBGaruda/ha-jp-wireless-chime
+
+- esphome-jp-wireless-chime  
+  https://github.com/MBGaruda/esphome-jp-wireless-chime
 
 ---
 
 ## Supported Protocols
 
-Currently supported protocols:
+### REVEX X
 
-* REVEX X Series
-* OHM 07 Series
+- 24bit RF frame
+- `protocol_hint: revex_x`
+
+### REVEX XP
+
+- 34bit RF frame
+- Supports XP extended melodies
+- `protocol_hint: revex_xp`
+
+### OHM-07
+
+- 24bit RF frame
+- `protocol_hint: ohm_07`
 
 ---
 
-## Features
+## Operation
 
-* 315MHz ASK/OOK RF signal reception
-* REVEX / OHM RF protocol decoding
-* 24bit RF data extraction
-* Home Assistant event dispatch
-* Duplicate signal suppression (5 seconds)
+### Event Publishing
+
+Received RF signals are published as Home Assistant events.
+
+Event name:
+
+```text
+esphome.jp_wireless_chime_raw_received
+```
+
+Example event:
+
+```yaml
+event_type: esphome.jp_wireless_chime_raw_received
+
+data:
+  source: wireless-chime-rx
+  protocol_version: "1"
+  protocol_hint: revex_x
+  bit_count: "24"
+  bits: "110101111111111100000001"
+  raw_hex: D7FF01
+  sync_us: "4535"
+  received_at_ms: "237082"
+```
+
+---
+
+## Event Data
+
+| Field | Description |
+|---|---|
+| source | ESPHome `esphome.name` |
+| protocol_version | Event specification version |
+| protocol_hint | `revex_x` / `revex_xp` / `ohm_07` |
+| bit_count | Received bit count |
+| bits | Raw bit string |
+| raw_hex | Decoded hexadecimal value |
+| sync_us | Detected sync pulse length |
+| received_at_ms | Milliseconds since ESP32 boot |
+
+---
+
+## Duplicate Event Suppression
+
+Wireless chime transmitters may send multiple RF frames during a single button press.
+
+This component suppresses duplicate events for the same protocol.
+
+Behavior:
+
+- Suppresses repeated events per `protocol_hint`
+- Refreshes the suppression timer whenever the same signal is received
+- Allows the next event only after RF transmission has stopped for 2000ms
+
+This helps prevent duplicate events caused by:
+
+- Long-duration transmitters
+- Misdecoded frames during continuous transmission
+- Noise-generated alternative HEX values
 
 ---
 
 ## Installation
 
-### Using external_components
+### External Components
 
 ```yaml
 external_components:
   - source:
       type: git
       url: https://github.com/MBGaruda/esphome-jp-wireless-chime
-      ref: main
-    components:
-      - jp_wireless_chime_receiver
 ```
 
 ---
 
-## Usage
-
-### Basic Configuration Example
+## ESPHome Configuration Example
 
 ```yaml
 esphome:
   name: wireless-chime-rx
+  friendly_name: Wireless Chime RX
 
 esp32:
   board: esp32dev
-  framework:
-    type: arduino
 
 logger:
+  level: INFO
 
 api:
-  homeassistant_services: true
+
+ota:
 
 wifi:
   ssid: !secret wifi_ssid
@@ -68,214 +143,87 @@ external_components:
   - source:
       type: git
       url: https://github.com/MBGaruda/esphome-jp-wireless-chime
-      ref: main
-    components:
-      - jp_wireless_chime_receiver
 
 jp_wireless_chime_receiver:
   pin: GPIO27
 ```
 
-### Parameters
+---
 
-* **pin**:
-  GPIO connected to the RF receiver DATA pin
+## GPIO Wiring Example
+
+Uses a standard 315MHz ASK/OOK RF receiver module.
+
+| RF Receiver | ESP32 |
+|---|---|
+| VCC | 3.3V |
+| GND | GND |
+| DATA | GPIO27 |
 
 ---
 
-## Hardware
+## Monitoring Events in Home Assistant
 
-### Required Components
-
-* ESP32
-* 315MHz ASK/OOK RF receiver module
-
-### Tested RF Receiver Modules
-
-* MX-RM-5V
-* SYN470R series
-* RXB6
-* WL101-341
-
-### Wiring Example
+Events can be monitored from the Home Assistant Developer Tools.
 
 ```text
-RF Receiver → ESP32
+Developer Tools
+→ Events
+→ Listen to events
 
-DATA → GPIO27
-VCC  → 3.3V
-GND  → GND
-```
-
----
-
-## Home Assistant Events
-
-The following event is fired when a signal is received:
-
-```text
 esphome.jp_wireless_chime_raw_received
 ```
 
 ---
 
-## Event Data
+## Logger Levels
+
+Normal operation:
+
+```yaml
+logger:
+  level: INFO
+```
+
+Debug mode:
+
+```yaml
+logger:
+  level: DEBUG
+```
+
+---
+
+## Receive Examples
 
 ### REVEX X
 
 ```yaml
-event_type: esphome.jp_wireless_chime_raw_received
+protocol_hint: revex_x
+bit_count: "24"
+raw_hex: D7FF01
+```
 
-data:
-  protocol_version: "1"
-  source: esp32_rf_receiver
-  protocol_hint: revex_x
-  bit_count: "24"
-  bits: "110101111111111100000001"
-  raw_hex: "D7FF01"
-  sync_us: "4535"
-  received_at_ms: "46262"
+### REVEX XP
+
+```yaml
+protocol_hint: revex_xp
+bit_count: "34"
+raw_hex: D7FF5050
 ```
 
 ### OHM-07
 
 ```yaml
-event_type: esphome.jp_wireless_chime_raw_received
-
-data:
-  protocol_version: "1"
-  source: esp32_rf_receiver
-  protocol_hint: ohm_07
-  bit_count: "24"
-  bits: "010101010101111101000100"
-  raw_hex: "555F44"
-  sync_us: "4156"
-  received_at_ms: "123456"
+protocol_hint: ohm_07
+bit_count: "24"
+raw_hex: 104F44
 ```
 
 ---
 
-## Parameter Details
+## Notes
 
-### protocol_version
-
-Event protocol version.
-
-Currently fixed to `"1"`.
-
-### source
-
-Event source identifier.
-
-Currently fixed to `"esp32_rf_receiver"`.
-
-### protocol_hint
-
-Detected RF protocol.
-
-* `revex_x`
-* `ohm_07`
-
-### bit_count
-
-Received bit length.
-
-Currently fixed to `"24"`.
-
-### bits
-
-Raw 24bit binary string.
-
-### raw_hex
-
-HEX representation of `bits`.
-
-This value is typically used as the primary key in the Home Assistant integration.
-
-### sync_us
-
-Detected synchronization pulse length in microseconds.
-
-### received_at_ms
-
-ESP32 uptime in milliseconds using `millis()`.
-
----
-
-## Duplicate Suppression
-
-Most RF transmitters send the same signal multiple times per button press.
-
-This component suppresses duplicate events for 5 seconds when:
-
-```text
-protocol_hint + raw_hex
-```
-
-matches a previously received signal.
-
----
-
-## Integration with Home Assistant
-
-This component is responsible for:
-
-* RF reception
-* RF decoding
-* raw_hex generation
-
-The following responsibilities are expected to be handled by the Home Assistant `jp_wireless_chime` integration:
-
-* Channel decoding
-* Melody decoding
-* Device/entity management
-* UI integration
-* Automation handling
-
----
-
-## Automation Example
-
-```yaml
-automation:
-  - alias: "Wireless Chime Debug"
-    trigger:
-      - platform: event
-        event_type: esphome.jp_wireless_chime_raw_received
-
-    action:
-      - service: system_log.write
-        data:
-          message: >
-            {{ trigger.event.data.protocol_hint }}
-            {{ trigger.event.data.raw_hex }}
-          level: info
-```
-
----
-
-## Tested Environment
-
-* Latest Home Assistant
-* ESPHome 2026.4.x
-* ESP32 DevKit
-* REVEX X Series
-* OHM-07 Series
-
----
-
-## Development Status
-
-This component is currently under development.
-
-Implemented features:
-
-* REVEX X reception
-* OHM-07 reception
-* Home Assistant event dispatch
-
----
-
-## Disclaimer
-
-This project is not affiliated with REVEX, OHM, ESPHome, or Home Assistant.
+- This component targets Japanese 315MHz wireless chime systems
+- Reception quality may vary depending on the RF receiver module and noise environment
+- Tested with ESPHome 2026.4 series

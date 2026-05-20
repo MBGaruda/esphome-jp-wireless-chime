@@ -1,65 +1,141 @@
-# ESPHome JP Wireless Chime Receiver
+# JP Wireless Chime Receiver for ESPHome
 
-Home Assistant 用の ESPHome external component。
-ESP32 と 315MHz RF 受信モジュールを使用して、日本の無線チャイム信号を受信します。
+日本のワイヤレスチャイム信号を ESP32 + ESPHome で受信し、Home Assistant イベントとして通知する ESPHome External Component です。
 
-このコンポーネントは日本の無線ドアチャイム製品の RF 信号を解析し、
-Home Assistant イベントとして通知します。
+このコンポーネントは以下のプロトコルに対応しています。
+
+- REVEX X シリーズ
+- REVEX XP シリーズ
+- OHM-07 シリーズ (品番が07で始まるワイヤレスチャイムシリーズ)
+
+受信した信号は Home Assistant のイベントとして発火され、`ha-jp-wireless-chime` などの統合で利用できます。
+
+関連リポジトリ：
+
+- ha-jp-wireless-chime
+  https://github.com/MBGaruda/ha-jp-wireless-chime
+
+- esphome-jp-wireless-chime
+  https://github.com/MBGaruda/esphome-jp-wireless-chime
 
 ---
 
 ## 対応プロトコル
 
-現在対応しているプロトコル：
+### REVEX X
 
-* REVEX X シリーズ
-* OHM 07 シリーズ
+- 24bit RF フレーム
+- `protocol_hint: revex_x`
+
+### REVEX XP
+
+- 34bit RF フレーム
+- XP拡張音色対応
+- `protocol_hint: revex_xp`
+
+### OHM-07
+
+- 24bit RF フレーム
+- `protocol_hint: ohm_07`
 
 ---
 
-## 機能
+## 動作仕様
 
-* 315MHz ASK/OOK RF 信号受信
-* REVEX / OHM RF プロトコル解析
-* 24bit RF データ抽出
-* Home Assistant イベント送信
-* 同一信号の重複抑止（5秒）
+### イベント発火
+
+受信した RF 信号は Home Assistant イベントとして発火されます。
+
+イベント名：
+
+```text
+esphome.jp_wireless_chime_raw_received
+```
+
+イベント例：
+
+```yaml
+event_type: esphome.jp_wireless_chime_raw_received
+
+data:
+  source: wireless-chime-rx
+  protocol_version: "1"
+  protocol_hint: revex_x
+  bit_count: "24"
+  bits: "110101111111111100000001"
+  raw_hex: D7FF01
+  sync_us: "4535"
+  received_at_ms: "237082"
+```
+
+---
+
+## イベントデータ
+
+| 項目 | 内容 |
+|---|---|
+| source | ESPHome の `esphome.name` |
+| protocol_version | イベント仕様バージョン |
+| protocol_hint | `revex_x` / `revex_xp` / `ohm_07` |
+| bit_count | 受信ビット数 |
+| bits | 生ビット列 |
+| raw_hex | デコード済みHEX |
+| sync_us | 検出した同期パルス長 |
+| received_at_ms | ESP32起動後の受信時刻(ms) |
+
+---
+
+## 重複イベント抑止
+
+ワイヤレスチャイム送信機は、1回の押下で複数フレームを送信する場合があります。
+
+このコンポーネントでは、同一プロトコルのイベントを一定時間抑止します。
+
+仕様：
+
+- 同一 `protocol_hint` のイベントを抑止
+- 同一信号を受信するたびにタイマーを更新
+- RF信号が途切れてから 2000ms 後に再発火可能
+
+これにより：
+
+- 長時間送信型チャイム
+- 同一押下中の誤デコード
+- ノイズによる別HEX生成
+
+などによる二重発火を防止します。
 
 ---
 
 ## インストール
 
-### external_components を使用
+### External Components
 
 ```yaml
 external_components:
   - source:
       type: git
       url: https://github.com/MBGaruda/esphome-jp-wireless-chime
-      ref: main
-    components:
-      - jp_wireless_chime_receiver
 ```
 
 ---
 
-## 使い方
-
-### 基本的な設定例
+## ESPHome設定例
 
 ```yaml
 esphome:
   name: wireless-chime-rx
+  friendly_name: Wireless Chime RX
 
 esp32:
   board: esp32dev
-  framework:
-    type: arduino
 
 logger:
+  level: INFO
 
 api:
-  homeassistant_services: true
+
+ota:
 
 wifi:
   ssid: !secret wifi_ssid
@@ -69,216 +145,87 @@ external_components:
   - source:
       type: git
       url: https://github.com/MBGaruda/esphome-jp-wireless-chime
-      ref: main
-    components:
-      - jp_wireless_chime_receiver
 
 jp_wireless_chime_receiver:
   pin: GPIO27
 ```
 
-### パラメータ説明
+---
 
-* **pin**:
-  RF 受信モジュールの DATA ピンを接続する GPIO 番号
+## GPIO接続例
+
+一般的な 315MHz ASK/OOK RF Receiver Module を使用します。
+
+| RF Receiver | ESP32 |
+|---|---|
+| VCC | 3.3V |
+| GND | GND |
+| DATA | GPIO27 |
 
 ---
 
-## ハードウェア
+## Home Assistantでの確認
 
-### 必要なもの
-
-* ESP32
-* 315MHz ASK/OOK RF受信モジュール
-
-### 動作確認済み受信モジュール
-
-* MX-RM-5V
-* SYN470R系
-* RXB6
-* WL101-341
-
-### 接続例
+Home Assistant の開発ツールからイベントを監視できます。
 
 ```text
-RF Receiver → ESP32
+開発ツール
+→ イベント
+→ イベントを購読
 
-DATA → GPIO27
-VCC  → 3.3V
-GND  → GND
-```
-
----
-
-## Home Assistant イベント
-
-受信時に以下イベントを送信します。
-
-```text
 esphome.jp_wireless_chime_raw_received
 ```
 
 ---
 
-## イベントデータ
+## ログレベル
+
+通常運用：
+
+```yaml
+logger:
+  level: INFO
+```
+
+デバッグ：
+
+```yaml
+logger:
+  level: DEBUG
+```
+
+---
+
+## 受信例
 
 ### REVEX X
 
 ```yaml
-event_type: esphome.jp_wireless_chime_raw_received
+protocol_hint: revex_x
+bit_count: "24"
+raw_hex: D7FF01
+```
 
-data:
-  protocol_version: "1"
-  source: esp32_rf_receiver
-  protocol_hint: revex_x
-  bit_count: "24"
-  bits: "110101111111111100000001"
-  raw_hex: "D7FF01"
-  sync_us: "4535"
-  received_at_ms: "46262"
+### REVEX XP
+
+```yaml
+protocol_hint: revex_xp
+bit_count: "34"
+raw_hex: D7FF5050
 ```
 
 ### OHM-07
 
 ```yaml
-event_type: esphome.jp_wireless_chime_raw_received
-
-data:
-  protocol_version: "1"
-  source: esp32_rf_receiver
-  protocol_hint: ohm_07
-  bit_count: "24"
-  bits: "010101010101111101000100"
-  raw_hex: "555F44"
-  sync_us: "4156"
-  received_at_ms: "123456"
+protocol_hint: ohm_07
+bit_count: "24"
+raw_hex: 104F44
 ```
 
 ---
 
-## パラメータ説明
+## 注意事項
 
-### protocol_version
-
-イベント仕様バージョン。
-
-現在は固定で `"1"`。
-
-### source
-
-イベント送信元。
-
-現在は固定で `"esp32_rf_receiver"`。
-
-### protocol_hint
-
-受信した RF プロトコル。
-
-* `revex_x`
-* `ohm_07`
-
-### bit_count
-
-受信したビット数。
-
-現在は固定で `"24"`。
-
-### bits
-
-24bit の生ビット列。
-
-### raw_hex
-
-bits を HEX 化した値。
-
-Home Assistant 統合側では通常この値をキーとして扱います。
-
-### sync_us
-
-検出した同期パルス長（マイクロ秒）。
-
-### received_at_ms
-
-ESP32 起動後の millis() 値。
-
----
-
-## 重複抑止
-
-多くの RF 送信機は、1回のボタン押下で同じ信号を複数回送信します。
-
-このコンポーネントでは：
-
-```text
-protocol_hint + raw_hex
-```
-
-が同一の場合、5秒間イベント送信を抑止します。
-
----
-
-## Home Assistant 統合との連携
-
-この component は：
-
-* RF受信
-* RF解析
-* raw_hex生成
-
-までを担当します。
-
-以下は Home Assistant 側の `jp_wireless_chime` 統合で行う想定です。
-
-* チャンネル解釈
-* 音色解釈
-* デバイス化
-* UI表示
-* オートメーション連携
-
----
-
-## 自動化の例
-
-```yaml
-automation:
-  - alias: "Wireless Chime Debug"
-    trigger:
-      - platform: event
-        event_type: esphome.jp_wireless_chime_raw_received
-
-    action:
-      - service: system_log.write
-        data:
-          message: >
-            {{ trigger.event.data.protocol_hint }}
-            {{ trigger.event.data.raw_hex }}
-          level: info
-```
-
----
-
-## 動作確認環境
-
-* Home Assistant 最新版
-* ESPHome 2026.4.x
-* ESP32 DevKit
-* REVEX Xシリーズ
-* OHM-07シリーズ
-
----
-
-## 開発状況
-
-この component は開発中です。
-
-現在は以下機能を実装済みです。
-
-* REVEX X 受信
-* OHM-07 受信
-* Home Assistant イベント送信
-
----
-
-## 免責事項
-
-このプロジェクトは REVEX、OHM、ESPHome、Home Assistant とは何ら関係はありません。
+- 本コンポーネントは 315MHz 日本向けワイヤレスチャイムを対象としています
+- RF受信モジュールの性能やノイズ環境により受信精度は変化します
+- ESPHome 2026.4 系で動作確認しています
